@@ -1,0 +1,9 @@
+{
+  "name": "netclone",
+  "iconUrl": "https://raw.githubusercontent.com/sevouz/netclone/builds/netclone.png",
+  "description": "Netflix, PrimeVideo, Disney+ Hotstar Contents in Multiple Languages",
+  "manifestVersion": 1,
+  "pluginLists": [
+    "https://raw.githubusercontent.com/sevouz/netclone/builds/plugins.json"
+  ]
+}
