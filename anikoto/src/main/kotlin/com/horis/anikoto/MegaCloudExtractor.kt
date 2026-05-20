@@ -6,7 +6,7 @@ import com.lagradost.cloudstream3.utils.AppUtils.parseJson
 import com.lagradost.cloudstream3.SubtitleFile
 
 /**
- * MegaCloud/RapidCloud extractor for HiAnime-style sites.
+ * MegaCloud/RapidCloud/MegaPlay extractor for Anikoto.
  */
 class MegaCloudExtractor {
 
@@ -23,7 +23,7 @@ class MegaCloudExtractor {
                 val document = response.document
                 val scriptContent = document.select("script").map { it.data() }.joinToString("\n")
 
-                // Method 1: Direct source URLs
+                // Method 1: Direct source URLs in page scripts
                 val m3u8Regex = Regex("""(?:file|source|src|url)\s*[:=]\s*['"]([^'"]*\.m3u8[^'"]*)['"]""")
                 m3u8Regex.findAll(scriptContent).forEach { match ->
                     callback.invoke(
@@ -35,8 +35,20 @@ class MegaCloudExtractor {
                     return
                 }
 
-                // Method 2: AJAX sources endpoint
-                val videoId = Regex("""(?:embed|e|v)/([^?/]+)""").find(embedUrl)?.groupValues?.get(1)
+                // Method 2: MP4 direct links
+                val mp4Regex = Regex("""(?:file|source|src|url)\s*[:=]\s*['"]([^'"]*\.mp4[^'"]*)['"]""")
+                mp4Regex.findAll(scriptContent).forEach { match ->
+                    callback.invoke(
+                        newExtractorLink(serverName, serverName, match.groupValues[1], type = ExtractorLinkType.VIDEO) {
+                            this.referer = embedUrl
+                            this.quality = Qualities.Unknown.value
+                        }
+                    )
+                    return
+                }
+
+                // Method 3: AJAX sources endpoint (MegaCloud/RapidCloud style)
+                val videoId = Regex("""(?:embed|e|v|stream)/([^?/]+)""").find(embedUrl)?.groupValues?.get(1)
                     ?: embedUrl.substringAfterLast("/").substringBefore("?")
 
                 if (videoId.isNotEmpty()) {
@@ -46,7 +58,9 @@ class MegaCloudExtractor {
                         "https://$host/ajax/embed-6/getSources?id=$videoId",
                         "https://$host/ajax/embed-6-v2/getSources?id=$videoId",
                         "https://$host/ajax/embed/getSources?id=$videoId",
-                        "https://$host/ajax/v2/embed/getSources?id=$videoId"
+                        "https://$host/ajax/v2/embed/getSources?id=$videoId",
+                        "https://$host/api/source/$videoId",
+                        "https://$host/api/stream/$videoId"
                     )
 
                     for (endpoint in sourceEndpoints) {
@@ -59,6 +73,7 @@ class MegaCloudExtractor {
                                 )
                             ).text
 
+                            // Try parsing as MegaCloud format
                             val sourceData = try {
                                 parseJson<MegaCloudSourceResponse>(sourceResponse)
                             } catch (_: Exception) { continue }
@@ -68,6 +83,17 @@ class MegaCloudExtractor {
                                 val linkType = if (sourceUrl.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                                 callback.invoke(
                                     newExtractorLink(serverName, serverName, sourceUrl, type = linkType) {
+                                        this.referer = embedUrl
+                                        this.quality = getQualityFromLabel(source.label)
+                                    }
+                                )
+                            }
+
+                            sourceData.sourcesBackup?.forEach { source ->
+                                val sourceUrl = source.file ?: return@forEach
+                                val linkType = if (sourceUrl.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                                callback.invoke(
+                                    newExtractorLink("$serverName Backup", "$serverName Backup", sourceUrl, type = linkType) {
                                         this.referer = embedUrl
                                         this.quality = getQualityFromLabel(source.label)
                                     }
@@ -87,7 +113,25 @@ class MegaCloudExtractor {
                     }
                 }
 
-                // Method 3: Iframe redirect
+                // Method 4: Packed JS
+                val packedRegex = Regex("""eval\(function\(p,a,c,k,e,[dr]\).*?\)""", RegexOption.DOT_MATCHES_ALL)
+                val packedMatch = packedRegex.find(scriptContent)
+                if (packedMatch != null) {
+                    val unpacked = JsUnpacker.unpack(packedMatch.value)
+                    if (unpacked != null) {
+                        m3u8Regex.findAll(unpacked).forEach { match ->
+                            callback.invoke(
+                                newExtractorLink(serverName, serverName, match.groupValues[1], type = ExtractorLinkType.M3U8) {
+                                    this.referer = embedUrl
+                                    this.quality = Qualities.Unknown.value
+                                }
+                            )
+                            return
+                        }
+                    }
+                }
+
+                // Method 5: Iframe redirect
                 val iframeSrc = document.selectFirst("iframe")?.attr("src")
                 if (!iframeSrc.isNullOrEmpty()) {
                     val iframeUrl = when {

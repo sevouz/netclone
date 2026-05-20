@@ -23,6 +23,8 @@ class AnikotoProvider : MainAPI() {
         TvType.OVA
     )
 
+    private val apiUrl = "https://anikotoapi.site"
+
     private val ajaxHeaders = mapOf(
         "X-Requested-With" to "XMLHttpRequest"
     )
@@ -215,7 +217,6 @@ class AnikotoProvider : MainAPI() {
         if (epJson?.result != null) {
             val epDoc = Jsoup.parse(epJson.result)
             epDoc.select("a[data-id], .ep-item").forEach { ep ->
-                val epId = ep.attr("data-id").ifEmpty { ep.attr("href").substringAfterLast("ep=") }
                 val epNum = ep.attr("data-number").toIntOrNull()
                     ?: ep.attr("href").let { Regex("ep-(\\d+)").find(it)?.groupValues?.get(1)?.toIntOrNull() }
                 val epTitle = ep.attr("title").ifEmpty { "Episode $epNum" }
@@ -223,7 +224,13 @@ class AnikotoProvider : MainAPI() {
                 val hasDub = ep.hasClass("dub") || ep.attr("class").contains("dub")
                     || ep.selectFirst(".dub") != null
 
-                val episodeData = EpisodeData(epId, url).toJson()
+                // Store animeId and episode number for API lookup
+                val episodeData = EpisodeData(
+                    animeId = animeId,
+                    episodeNum = epNum ?: 1,
+                    referer = url
+                ).toJson()
+
                 val episode = newEpisode(episodeData) {
                     this.name = epTitle
                     this.episode = epNum
@@ -254,67 +261,63 @@ class AnikotoProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         val episodeData = parseJson<EpisodeData>(data)
-        val episodeId = episodeData.id
+        val animeId = episodeData.animeId
+        val episodeNum = episodeData.episodeNum
 
-        // Get servers
-        val serversResponse = app.get(
-            "$mainUrl/ajax/episode/servers?episodeId=$episodeId",
-            headers = ajaxHeaders,
-            referer = episodeData.referer ?: mainUrl
+        // Fetch episode data from the community API
+        val apiResponse = app.get(
+            "$apiUrl/series/$animeId",
+            headers = mapOf("Referer" to mainUrl)
         ).text
 
-        val serversJson = parseAjaxResponse(serversResponse) ?: return false
-        if (serversJson.result.isNullOrEmpty()) return false
+        val seriesData = try {
+            parseJson<ApiSeriesResponse>(apiResponse)
+        } catch (_: Exception) { return false }
 
-        val serversDoc = Jsoup.parse(serversJson.result)
+        if (seriesData.ok != true) return false
 
-        val serverTypes = listOf("sub", "dub", "raw")
-        serverTypes.forEach { type ->
-            serversDoc.select(".servers-$type .server-item, .server-item[data-type=$type]").forEach { server ->
-                val serverId = server.attr("data-id")
-                val serverName = server.text().trim()
+        // Find the matching episode by number
+        val episode = seriesData.data?.episodes?.find { it.number == episodeNum }
+            ?: return false
 
-                if (serverId.isNotEmpty()) {
-                    try {
-                        val sourceResponse = app.get(
-                            "$mainUrl/ajax/episode/sources?id=$serverId",
-                            headers = ajaxHeaders,
-                            referer = episodeData.referer ?: mainUrl
-                        ).text
+        var foundLinks = false
 
-                        val sourceData = parseSourceResponse(sourceResponse)
-                        val embedUrl = sourceData?.link ?: return@forEach
-
-                        val prefix = when (type) {
-                            "dub" -> "[DUB] "
-                            "raw" -> "[RAW] "
-                            else -> ""
-                        }
-
-                        MegaCloudExtractor.extractFromEmbed(
-                            embedUrl = embedUrl,
-                            referer = mainUrl,
-                            serverName = "$prefix$serverName",
-                            subtitleCallback = subtitleCallback,
-                            callback = callback
-                        )
-                    } catch (_: Exception) { }
-                }
-            }
+        // Extract SUB embed URL
+        val subUrl = episode.embed_url?.sub
+        if (!subUrl.isNullOrEmpty()) {
+            try {
+                MegaCloudExtractor.extractFromEmbed(
+                    embedUrl = subUrl,
+                    referer = mainUrl,
+                    serverName = "MegaPlay SUB",
+                    subtitleCallback = subtitleCallback,
+                    callback = callback
+                )
+                foundLinks = true
+            } catch (_: Exception) { }
         }
 
-        return true
+        // Extract DUB embed URL
+        val dubUrl = episode.embed_url?.dub
+        if (!dubUrl.isNullOrEmpty()) {
+            try {
+                MegaCloudExtractor.extractFromEmbed(
+                    embedUrl = dubUrl,
+                    referer = mainUrl,
+                    serverName = "MegaPlay DUB",
+                    subtitleCallback = subtitleCallback,
+                    callback = callback
+                )
+                foundLinks = true
+            } catch (_: Exception) { }
+        }
+
+        return foundLinks
     }
 
     private fun parseAjaxResponse(text: String): AjaxResponse? {
         return try {
             parseJson<AjaxResponse>(text)
-        } catch (_: Exception) { null }
-    }
-
-    private fun parseSourceResponse(text: String): SourceResponse? {
-        return try {
-            parseJson<SourceResponse>(text)
         } catch (_: Exception) { null }
     }
 
@@ -324,13 +327,37 @@ class AnikotoProvider : MainAPI() {
     )
 
     data class EpisodeData(
-        val id: String,
+        val animeId: String,
+        val episodeNum: Int,
         val referer: String? = null
     )
 
-    data class SourceResponse(
-        val link: String? = null,
-        val type: String? = null,
-        val server: String? = null
+    // API response models
+    data class ApiSeriesResponse(
+        val ok: Boolean? = null,
+        val data: ApiSeriesData? = null
+    )
+
+    data class ApiSeriesData(
+        val anime: ApiAnime? = null,
+        val episodes: List<ApiEpisode>? = null
+    )
+
+    data class ApiAnime(
+        val id: Int? = null,
+        val title: String? = null,
+        val slug: String? = null
+    )
+
+    data class ApiEpisode(
+        val id: Int? = null,
+        val number: Int? = null,
+        val title: String? = null,
+        val embed_url: ApiEmbedUrl? = null
+    )
+
+    data class ApiEmbedUrl(
+        val sub: String? = null,
+        val dub: String? = null
     )
 }
