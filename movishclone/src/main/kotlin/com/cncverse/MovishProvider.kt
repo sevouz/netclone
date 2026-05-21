@@ -3,8 +3,12 @@ package com.cncverse
 import com.fasterxml.jackson.annotation.JsonProperty
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.LoadResponse.Companion.addTrailer
+import com.lagradost.cloudstream3.network.WebViewResolver
 import com.lagradost.cloudstream3.utils.ExtractorLink
-import com.lagradost.cloudstream3.utils.loadExtractor
+import com.lagradost.cloudstream3.utils.ExtractorLinkType
+import com.lagradost.cloudstream3.utils.INFER_TYPE
+import com.lagradost.cloudstream3.utils.Qualities
+import com.lagradost.cloudstream3.utils.newExtractorLink
 
 class MovishProvider : MainAPI() {
     override var mainUrl = "https://movish.net"
@@ -203,17 +207,41 @@ class MovishProvider : MainAPI() {
 
         servers.amap { (serverName, embedUrl) ->
             try {
-                loadExtractor(embedUrl, mainUrl, subtitleCallback, callback)
-            } catch (_: Exception) {
-                // If no extractor found, try to load as iframe source
-                try {
-                    val doc = app.get(embedUrl, referer = mainUrl).document
-                    val iframeSrc = doc.selectFirst("iframe")?.attr("src")
-                    if (!iframeSrc.isNullOrBlank()) {
-                        loadExtractor(iframeSrc, embedUrl, subtitleCallback, callback)
-                    }
-                } catch (_: Exception) { }
-            }
+                val response = app.get(
+                    embedUrl,
+                    referer = mainUrl,
+                    interceptor = WebViewResolver(
+                        Regex("""\.m3u8|\.mp4|master\.txt|playlist"""),
+                        additionalUrls = listOf(Regex("""\.vtt|\.srt""")),
+                        timeout = 18
+                    )
+                )
+                val videoUrl = response.url
+                if (videoUrl.contains(".m3u8") || videoUrl.contains("master.txt") || videoUrl.contains("playlist")) {
+                    callback.invoke(
+                        newExtractorLink(
+                            source = serverName,
+                            name = serverName,
+                            url = videoUrl,
+                            type = ExtractorLinkType.M3U8
+                        ) {
+                            this.referer = embedUrl
+                        }
+                    )
+                } else if (videoUrl.contains(".mp4")) {
+                    callback.invoke(
+                        newExtractorLink(
+                            source = serverName,
+                            name = serverName,
+                            url = videoUrl,
+                            type = INFER_TYPE
+                        ) {
+                            this.referer = embedUrl
+                            this.quality = Qualities.Unknown.value
+                        }
+                    )
+                }
+            } catch (_: Exception) { }
         }
 
         return true
