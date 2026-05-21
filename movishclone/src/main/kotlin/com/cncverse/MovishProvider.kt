@@ -73,7 +73,11 @@ class MovishProvider : MainAPI() {
     }
 
     override suspend fun load(url: String): LoadResponse {
-        val (idStr, mediaType) = url.split("|")
+        // Cloudstream may prepend mainUrl, so strip any URL prefix to get "id|type"
+        val cleanUrl = url.replace("$mainUrl/", "").replace(mainUrl, "")
+        val parts = cleanUrl.split("|")
+        val idStr = parts[0]
+        val mediaType = parts.getOrElse(1) { "movie" }
         val tmdbId = idStr.toInt()
 
         if (mediaType == "tv") {
