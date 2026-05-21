@@ -3,12 +3,12 @@ package com.cncverse
 import com.fasterxml.jackson.annotation.JsonProperty
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.LoadResponse.Companion.addTrailer
-import com.lagradost.cloudstream3.network.WebViewResolver
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.INFER_TYPE
 import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.newExtractorLink
+import java.net.URLEncoder
 
 class MovishProvider : MainAPI() {
     override var mainUrl = "https://movish.net"
@@ -175,77 +175,200 @@ class MovishProvider : MainAPI() {
 
         val isMovie = mediaType == "movie"
 
-        val servers = if (isMovie) {
-            listOf(
-                "Flux" to "https://movish.net/moviebox-embed/movie/$tmdbId",
-                "Shadow" to "https://vidlink.pro/movie/$tmdbId",
-                "Cine" to "https://cinesrc.st/embed/movie/$tmdbId",
-                "Stream" to "https://rivestream.org/embed?type=movie&id=$tmdbId",
-                "Torrent" to "https://rivestream.org/embed/torrent?type=movie&id=$tmdbId",
-                "Crown" to "https://www.vidking.net/embed/movie/$tmdbId",
-                "Quantum" to "https://player.videasy.net/movie/$tmdbId",
-                "Prism" to "https://vidsrc.me/embed/movie/$tmdbId",
-                "Onyx" to "https://2embed.cc/embed/$tmdbId",
-                "Titan" to "https://multiembed.mov/?video_id=$tmdbId",
-                "Vortex" to "https://vidsrcme.ru/embed/movie?tmdb=$tmdbId",
-            )
-        } else {
-            listOf(
-                "Flux" to "https://movish.net/moviebox-embed/tv/$tmdbId/$season/$episode",
-                "Shadow" to "https://vidlink.pro/tv/$tmdbId/$season/$episode",
-                "Cine" to "https://cinesrc.st/embed/tv/$tmdbId/$season/$episode",
-                "Stream" to "https://rivestream.org/embed?type=tv&id=$tmdbId&season=$season&episode=$episode",
-                "Torrent" to "https://rivestream.org/embed/torrent?type=tv&id=$tmdbId&season=$season&episode=$episode",
-                "Crown" to "https://www.vidking.net/embed/tv/$tmdbId/$season/$episode",
-                "Quantum" to "https://player.videasy.net/tv/$tmdbId/$season/$episode",
-                "Prism" to "https://vidsrc.me/embed/tv/$tmdbId/$season/$episode",
-                "Onyx" to "https://2embed.cc/embedtv/$tmdbId&s=$season&e=$episode",
-                "Titan" to "https://multiembed.mov/?video_id=$tmdbId&s=$season&e=$episode",
-                "Vortex" to "https://vidsrcme.ru/embed/tv?tmdb=$tmdbId&season=$season&episode=$episode",
-            )
+        // Get title and year from TMDB for Videasy API
+        val type = if (isMovie) "movie" else "tv"
+        val tmdbDetails = try {
+            app.get("$tmdbAPI/$type/$tmdbId?api_key=$apiKey&append_to_response=external_ids").parsed<TmdbDetailsForLinks>()
+        } catch (_: Exception) { null }
+
+        val title = tmdbDetails?.title ?: tmdbDetails?.name ?: ""
+        val year = (tmdbDetails?.releaseDate ?: tmdbDetails?.firstAirDate ?: "").take(4)
+        val imdbId = tmdbDetails?.externalIds?.imdbId ?: ""
+
+        // --- Videasy Extraction (10 servers) ---
+        val videasyServers = mapOf(
+            "Neon" to "https://api.videasy.net/myflixerzupcloud/sources-with-title",
+            "Cypher" to "https://api.videasy.net/moviebox/sources-with-title",
+            "Reyna" to "https://api.videasy.net/primewire/sources-with-title",
+            "Omen" to "https://api.videasy.net/onionplay/sources-with-title",
+            "Breach" to "https://api.videasy.net/m4uhd/sources-with-title",
+            "Ghost" to "https://api.videasy.net/primesrcme/sources-with-title",
+            "Sage" to "https://api.videasy.net/1movies/sources-with-title",
+            "Vyse" to "https://api.videasy.net/hdmovie/sources-with-title",
+            "Raze" to "https://api.videasy.net/superflix/sources-with-title",
+        )
+
+        val videasyHeaders = mapOf(
+            "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+            "Accept" to "application/json, text/plain, */*",
+            "Origin" to "https://player.videasy.net",
+            "Referer" to "https://player.videasy.net/"
+        )
+
+        if (title.isNotBlank()) {
+            videasyServers.entries.toList().amap { (serverName, serverUrl) ->
+                try {
+                    var apiUrl = "$serverUrl?title=${URLEncoder.encode(title, "UTF-8")}" +
+                            "&mediaType=$type&year=$year" +
+                            "&tmdbId=$tmdbId&imdbId=$imdbId"
+                    if (!isMovie) apiUrl += "&seasonId=$season&episodeId=$episode"
+
+                    val encResponse = app.get(apiUrl, headers = videasyHeaders).text
+                    if (encResponse.length < 20 || encResponse.startsWith("<")) return@amap
+
+                    // Decrypt via enc-dec.app
+                    val decResponse = app.post(
+                        "https://enc-dec.app/api/dec-videasy",
+                        json = mapOf("text" to encResponse, "id" to tmdbId),
+                        headers = mapOf("Content-Type" to "application/json")
+                    ).parsed<VideasyDecryptResponse>()
+
+                    val sources = decResponse.result?.sources ?: decResponse.sources ?: return@amap
+                    sources.forEach { source ->
+                        val url = source.url ?: return@forEach
+                        callback.invoke(
+                            newExtractorLink(
+                                source = "Videasy $serverName",
+                                name = "Videasy $serverName - ${source.quality ?: "Auto"}",
+                                url = url,
+                                type = if (url.contains(".m3u8")) ExtractorLinkType.M3U8 else INFER_TYPE
+                            ) {
+                                this.referer = "https://player.videasy.net/"
+                                this.quality = getQualityInt(source.quality)
+                            }
+                        )
+                    }
+                } catch (_: Exception) { }
+            }
+
+            // Yoru server (movies only)
+            if (isMovie) {
+                try {
+                    var apiUrl = "https://api.videasy.net/cdn/sources-with-title?title=${URLEncoder.encode(title, "UTF-8")}" +
+                            "&mediaType=$type&year=$year" +
+                            "&tmdbId=$tmdbId&imdbId=$imdbId"
+
+                    val encResponse = app.get(apiUrl, headers = videasyHeaders).text
+                    if (encResponse.length >= 20 && !encResponse.startsWith("<")) {
+                        val decResponse = app.post(
+                            "https://enc-dec.app/api/dec-videasy",
+                            json = mapOf("text" to encResponse, "id" to tmdbId),
+                            headers = mapOf("Content-Type" to "application/json")
+                        ).parsed<VideasyDecryptResponse>()
+
+                        val sources = decResponse.result?.sources ?: decResponse.sources
+                        sources?.forEach { source ->
+                            val url = source.url ?: return@forEach
+                            callback.invoke(
+                                newExtractorLink(
+                                    source = "Videasy Yoru",
+                                    name = "Videasy Yoru - ${source.quality ?: "Auto"}",
+                                    url = url,
+                                    type = if (url.contains(".m3u8")) ExtractorLinkType.M3U8 else INFER_TYPE
+                                ) {
+                                    this.referer = "https://player.videasy.net/"
+                                    this.quality = getQualityInt(source.quality)
+                                }
+                            )
+                        }
+                    }
+                } catch (_: Exception) { }
+            }
         }
 
-        servers.amap { (serverName, embedUrl) ->
-            try {
-                val response = app.get(
-                    embedUrl,
-                    referer = mainUrl,
-                    interceptor = WebViewResolver(
-                        Regex("""\.m3u8|\.mp4|master\.txt|playlist"""),
-                        additionalUrls = listOf(Regex("""\.vtt|\.srt""")),
-                        timeout = 18
+        // --- Vidlink Extraction ---
+        try {
+            val encRes = app.get(
+                "https://enc-dec.app/api/enc-vidlink?text=${URLEncoder.encode(tmdbId, "UTF-8")}",
+                headers = mapOf("User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+            ).parsed<EncDecResponse>()
+
+            val encodedTmdb = encRes.result
+            if (!encodedTmdb.isNullOrBlank()) {
+                val vidlinkUrl = if (isMovie) {
+                    "https://vidlink.pro/api/b/movie/$encodedTmdb?multiLang=0"
+                } else {
+                    "https://vidlink.pro/api/b/tv/$encodedTmdb/$season/$episode?multiLang=0"
+                }
+
+                val vidlinkRes = app.get(
+                    vidlinkUrl,
+                    headers = mapOf(
+                        "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                        "Referer" to "https://vidlink.pro"
                     )
-                )
-                val videoUrl = response.url
-                if (videoUrl.contains(".m3u8") || videoUrl.contains("master.txt") || videoUrl.contains("playlist")) {
+                ).parsed<VidlinkResponse>()
+
+                val playlist = vidlinkRes.stream?.playlist
+                if (!playlist.isNullOrBlank()) {
                     callback.invoke(
                         newExtractorLink(
-                            source = serverName,
-                            name = serverName,
-                            url = videoUrl,
+                            source = "Vidlink",
+                            name = "Vidlink",
+                            url = playlist,
                             type = ExtractorLinkType.M3U8
                         ) {
-                            this.referer = embedUrl
-                        }
-                    )
-                } else if (videoUrl.contains(".mp4")) {
-                    callback.invoke(
-                        newExtractorLink(
-                            source = serverName,
-                            name = serverName,
-                            url = videoUrl,
-                            type = INFER_TYPE
-                        ) {
-                            this.referer = embedUrl
-                            this.quality = Qualities.Unknown.value
+                            this.referer = "https://vidlink.pro"
                         }
                     )
                 }
-            } catch (_: Exception) { }
-        }
+            }
+        } catch (_: Exception) { }
 
         return true
     }
+
+    private fun getQualityInt(quality: String?): Int {
+        return when {
+            quality == null -> Qualities.Unknown.value
+            quality.contains("2160") || quality.contains("4K", true) -> Qualities.P2160.value
+            quality.contains("1080") -> Qualities.P1080.value
+            quality.contains("720") -> Qualities.P720.value
+            quality.contains("480") -> Qualities.P480.value
+            quality.contains("360") -> Qualities.P360.value
+            else -> Qualities.Unknown.value
+        }
+    }
+
+    // --- Vidlink/Videasy Data Classes ---
+
+    data class EncDecResponse(
+        @JsonProperty("result") val result: String? = null
+    )
+
+    data class VidlinkResponse(
+        @JsonProperty("stream") val stream: VidlinkStream? = null
+    )
+
+    data class VidlinkStream(
+        @JsonProperty("playlist") val playlist: String? = null
+    )
+
+    data class VideasyDecryptResponse(
+        @JsonProperty("result") val result: VideasyResult? = null,
+        @JsonProperty("sources") val sources: List<VideasySource>? = null
+    )
+
+    data class VideasyResult(
+        @JsonProperty("sources") val sources: List<VideasySource>? = null
+    )
+
+    data class VideasySource(
+        @JsonProperty("url") val url: String? = null,
+        @JsonProperty("quality") val quality: String? = null
+    )
+
+    data class TmdbDetailsForLinks(
+        @JsonProperty("title") val title: String? = null,
+        @JsonProperty("name") val name: String? = null,
+        @JsonProperty("release_date") val releaseDate: String? = null,
+        @JsonProperty("first_air_date") val firstAirDate: String? = null,
+        @JsonProperty("external_ids") val externalIds: TmdbExternalIds? = null
+    )
+
+    data class TmdbExternalIds(
+        @JsonProperty("imdb_id") val imdbId: String? = null
+    )
 
     // --- TMDB Data Classes ---
 
