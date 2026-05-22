@@ -44,9 +44,13 @@ class MegaPlayExtractor : ExtractorApi() {
                 "Referer" to mainUrl
             )
 
-            // The URL from API is like: https://megaplay.buzz/stream/s-2/169591/sub
-            // We need to load this page and find the player data-id
-            val pageResponse = app.get(url, headers = headers)
+            // The URL is like: https://megaplay.buzz/stream/s-2/169591/sub
+            // Must send referer to avoid 410 error
+            val embedHeaders = mapOf(
+                "Referer" to (referer ?: "https://anikoto.cz/"),
+                "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
+            )
+            val pageResponse = app.get(url, headers = embedHeaders)
             val document = pageResponse.document
 
             val id = document.selectFirst("#megaplay-player")?.attr("data-id")
