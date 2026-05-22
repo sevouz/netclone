@@ -200,9 +200,10 @@ class Anikoto : MainAPI() {
             "Referer" to mainUrl
         )
 
-        // Step 1: Get server list
+        // Step 1: Get server list (dataIds must be URL-encoded for + and = chars)
+        val encodedDataIds = java.net.URLEncoder.encode(dataIds, "UTF-8")
         val serverResponse = app.get(
-            "$mainUrl/ajax/server/list?servers=$dataIds",
+            "$mainUrl/ajax/server/list?servers=$encodedDataIds",
             headers = ajaxHeaders
         ).text
         val serverResult = parseJson<AjaxResponse>(serverResponse)
@@ -224,9 +225,10 @@ class Anikoto : MainAPI() {
             if (linkId.isBlank()) return@forEach
 
             try {
-                // Step 3: Get actual embed URL
+                // Step 3: Get actual embed URL (link-id must be URL-encoded)
+                val encodedLinkId = java.net.URLEncoder.encode(linkId, "UTF-8")
                 val embedResponse = app.get(
-                    "$mainUrl/ajax/server?get=$linkId",
+                    "$mainUrl/ajax/server?get=$encodedLinkId",
                     headers = ajaxHeaders
                 ).text
                 val embedResult = parseJson<ServerGetResponse>(embedResponse)
