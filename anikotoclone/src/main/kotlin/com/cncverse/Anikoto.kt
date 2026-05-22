@@ -77,14 +77,21 @@ class Anikoto : MainAPI() {
         val watchMain = document.selectFirst("div#watch-main")
         val animeId = watchMain?.attr("data-id") ?: ""
 
-        val title = document.selectFirst("h2.film-name a")?.text()?.trim()
-            ?: document.selectFirst("h2.film-name")?.text()?.trim()
+        // Title from w-info section
+        val title = document.selectFirst("div#w-info h1.title")?.text()?.trim()
+            ?: document.selectFirst("meta[property=og:title]")?.attr("content")
+                ?.replace(Regex("Watch|Online|Free|-|Anikoto|Anime"), "")?.trim()
             ?: "Unknown"
 
-        val poster = document.selectFirst("div.anisc-poster img")?.attr("src")
-            ?: document.selectFirst("img.film-poster-img")?.attr("src")
+        // Poster
+        val poster = document.selectFirst("div#w-info div.poster img")?.attr("src")
+            ?: document.selectFirst("meta[property=og:image]")?.attr("content")
 
-        val description = document.selectFirst("div.film-description div.text")?.text()?.trim()
+        // Description
+        val description = document.selectFirst("div#w-info div.synopsis div.content")?.text()?.trim()
+
+        // Japanese name
+        val japName = document.selectFirst("h1.title.d-title")?.attr("data-jp")
 
         // Get episodes via AJAX
         val ajaxHeaders = mapOf(
@@ -132,28 +139,27 @@ class Anikoto : MainAPI() {
             }
         }
 
-        // Extract metadata
+        // Extract metadata from bmeta section
         var year: Int? = null
         var malId: Int? = null
         var aniListId: Int? = null
         var status: ShowStatus? = null
         val tags = mutableListOf<String>()
 
-        document.select("div.anisc-info div.item").forEach { item ->
-            val label = item.selectFirst("span.item-head")?.text()?.trim()?.removeSuffix(":")
+        document.select("div#w-info div.bmeta div.meta div").forEach { item ->
+            val text = item.text()
             when {
-                label?.contains("Aired") == true -> {
-                    year = Regex("(\\d{4})").find(item.text())?.groupValues?.get(1)?.toIntOrNull()
+                text.startsWith("Premiered:") || text.startsWith("Aired:") -> {
+                    year = Regex("(\\d{4})").find(text)?.groupValues?.get(1)?.toIntOrNull()
                 }
-                label?.contains("Status") == true -> {
-                    val statusText = item.selectFirst("span.name")?.text()
+                text.startsWith("Status:") -> {
                     status = when {
-                        statusText?.contains("Airing", true) == true -> ShowStatus.Ongoing
-                        statusText?.contains("Finished", true) == true -> ShowStatus.Completed
+                        text.contains("Airing", true) -> ShowStatus.Ongoing
+                        text.contains("Finished", true) -> ShowStatus.Completed
                         else -> null
                     }
                 }
-                label?.contains("Genre") == true -> {
+                text.startsWith("Genres:") || text.startsWith("Genre:") -> {
                     tags.addAll(item.select("a").map { it.text().trim() })
                 }
             }
@@ -168,6 +174,7 @@ class Anikoto : MainAPI() {
 
         return newAnimeLoadResponse(title, url, TvType.Anime) {
             engName = title
+            this.japName = japName
             this.posterUrl = poster
             this.year = year
             this.showStatus = status
