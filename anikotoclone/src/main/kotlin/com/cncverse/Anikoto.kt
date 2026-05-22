@@ -1,14 +1,17 @@
 package com.cncverse
 
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties
 import com.fasterxml.jackson.annotation.JsonProperty
 import com.lagradost.api.Log
 import com.lagradost.cloudstream3.*
+import com.lagradost.cloudstream3.LoadResponse.Companion.addAniListId
+import com.lagradost.cloudstream3.LoadResponse.Companion.addMalId
 import com.lagradost.cloudstream3.utils.*
 import com.lagradost.cloudstream3.utils.AppUtils.parseJson
 import org.jsoup.nodes.Element
 
 class Anikoto : MainAPI() {
-    override var mainUrl = "https://anikototv.to"
+    override var mainUrl = "https://anikoto.cz"
     override var name = "Anikoto"
     override val hasMainPage = true
     override var lang = "en"
@@ -22,151 +25,158 @@ class Anikoto : MainAPI() {
 
     companion object {
         private const val TAG = "Anikoto"
+        private const val API_URL = "https://anikotoapi.site"
     }
 
     override val mainPage = mainPageOf(
-        "recently-updated" to "Recently Updated",
-        "top-airing" to "Top Airing",
-        "most-popular" to "Most Popular",
-        "most-favorite" to "Most Favorite",
-        "completed" to "Completed",
+        "$mainUrl/filter?page=" to "Latest",
+        "$mainUrl/status/ongoing?page=" to "Ongoing",
+        "$mainUrl/status/completed?page=" to "Completed",
     )
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        val url = "$mainUrl/${request.data}?page=$page"
+        val url = "${request.data}$page"
         val document = app.get(url).document
         val home = document.select("div.flw-item").mapNotNull { it.toSearchResult() }
-        return newHomePageResponse(request.name, home)
+        return newHomePageResponse(request.name, home, hasNext = home.isNotEmpty())
     }
 
     private fun Element.toSearchResult(): SearchResponse? {
-        val title = this.selectFirst("h3.film-name a")?.text()?.trim() ?: return null
-        val href = fixUrl(this.selectFirst("h3.film-name a")?.attr("href") ?: return null)
+        val aTag = this.selectFirst("a.dynamic-name") ?: this.selectFirst("h3.film-name a") ?: return null
+        val title = aTag.text().trim().ifBlank { return null }
+        val href = fixUrl(aTag.attr("href"))
         val posterUrl = this.selectFirst("img.film-poster-img")?.attr("data-src")
-            ?: this.selectFirst("img.film-poster-img")?.attr("src")
+            ?: this.selectFirst("img")?.attr("data-src")
+            ?: this.selectFirst("img")?.attr("src")
 
-        val subCount = this.selectFirst("div.tick-sub")?.text()?.toIntOrNull()
-        val dubCount = this.selectFirst("div.tick-dub")?.text()?.toIntOrNull()
-        val epsCount = this.selectFirst("div.tick-eps")?.text()?.toIntOrNull()
+        val subText = this.selectFirst("div.tick-sub")?.text()?.trim()
+        val dubText = this.selectFirst("div.tick-dub")?.text()?.trim()
+
+        val subCount = subText?.toIntOrNull()
+        val dubCount = dubText?.toIntOrNull()
 
         return newAnimeSearchResponse(title, href, TvType.Anime) {
             this.posterUrl = posterUrl
             addDubStatus(
-                dubExist = dubCount != null,
-                subExist = subCount != null,
+                dubExist = dubCount != null && dubCount > 0,
+                subExist = subCount != null && subCount > 0,
                 dubEpisodes = dubCount,
-                subEpisodes = subCount ?: epsCount
+                subEpisodes = subCount
             )
         }
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
-        val url = "$mainUrl/search?keyword=$query"
+        val url = "$mainUrl/filter?keyword=$query"
         val document = app.get(url).document
         return document.select("div.flw-item").mapNotNull { it.toSearchResult() }
     }
 
     override suspend fun load(url: String): LoadResponse {
-        val document = app.get(url).document
+        // Extract slug from URL like /watch/re-zero-starting-life-in-another-world-season-4-4hk9h
+        val slug = url.substringAfterLast("/watch/").substringBefore("/").substringBefore("?")
 
-        val title = document.selectFirst("h2.film-name")?.text()?.trim()
-            ?: document.selectFirst("h1")?.text()?.trim()
-            ?: "Unknown"
-
-        val poster = document.selectFirst("img.film-poster-img")?.attr("src")
-        val description = document.selectFirst("div.film-description div.text")?.text()?.trim()
-
-        val animeId = document.selectFirst("div[data-id]")?.attr("data-id")
-            ?: url.substringAfterLast("-").substringBefore("/")
-
-        // Extract info items
-        val infoItems = document.select("div.anisc-info div.item")
-        var year: Int? = null
-        var status: ShowStatus? = null
-        val tags = mutableListOf<String>()
-        var japName: String? = null
-        var malId: Int? = null
-        var aniListId: Int? = null
-
-        infoItems.forEach { item ->
-            val label = item.selectFirst("span.item-head")?.text()?.trim()?.removeSuffix(":")?.trim()
-            when (label) {
-                "Aired" -> {
-                    year = Regex("(\\d{4})").find(item.text())?.groupValues?.get(1)?.toIntOrNull()
-                }
-                "Status" -> {
-                    val statusText = item.selectFirst("span.name")?.text()?.trim()
-                    status = when {
-                        statusText?.contains("Airing", true) == true -> ShowStatus.Ongoing
-                        statusText?.contains("Finished", true) == true -> ShowStatus.Completed
-                        else -> null
-                    }
-                }
-                "Genres" -> {
-                    tags.addAll(item.select("a").map { it.text().trim() })
-                }
-                "Japanese" -> {
-                    japName = item.selectFirst("span.name")?.text()?.trim()
-                }
-                "MAL Score" -> {
-                    // Could extract MAL score if needed
-                }
-            }
+        // Try to find the anime in the API by slug
+        val apiData = try {
+            val recentResponse = app.get("$API_URL/recent-anime").text
+            val recentResult = parseJson<ApiRecentResponse>(recentResponse)
+            recentResult.data.firstOrNull { it.slug == slug }
+        } catch (e: Exception) {
+            Log.e(TAG, "API recent-anime failed: ${e.message}")
+            null
         }
 
-        // Try to get MAL/AniList IDs from external links
-        document.select("a.btn-play").forEach { link ->
-            val href = link.attr("href")
-            if (href.contains("myanimelist.net")) {
-                malId = href.substringAfterLast("/").toIntOrNull()
-            } else if (href.contains("anilist.co")) {
-                aniListId = href.substringAfterLast("/").toIntOrNull()
-            }
+        if (apiData != null) {
+            return loadFromApi(apiData, url)
         }
 
-        // Get episodes via AJAX
-        val episodesUrl = "$mainUrl/ajax/v2/episode/list/$animeId"
-        val episodesHtml = app.get(episodesUrl, headers = mapOf(
-            "X-Requested-With" to "XMLHttpRequest",
-            "Referer" to url
-        )).parsedSafe<AjaxResponse>()?.html ?: ""
+        // Fallback: scrape the page directly
+        return loadFromScrape(url, slug)
+    }
 
-        val episodesDoc = org.jsoup.Jsoup.parse(episodesHtml)
+    private suspend fun loadFromApi(anime: ApiAnime, url: String): LoadResponse {
+        // Get full series data with episodes
+        val seriesResponse = app.get("$API_URL/series/${anime.id}").text
+        val seriesResult = parseJson<ApiSeriesResponse>(seriesResponse)
+        val seriesData = seriesResult.data
+
+        val title = seriesData.anime.title
+        val poster = seriesData.anime.poster
+        val description = seriesData.anime.description
+        val year = seriesData.anime.year
+        val malId = seriesData.anime.malId?.toIntOrNull()
+        val aniId = seriesData.anime.aniId?.toIntOrNull()
+        val backgroundImage = seriesData.anime.backgroundImage?.ifBlank { null }
+
+        val status = when {
+            seriesData.anime.status?.contains("Airing", true) == true -> ShowStatus.Ongoing
+            seriesData.anime.status?.contains("Finished", true) == true -> ShowStatus.Completed
+            else -> null
+        }
+
+        val genres = seriesData.anime.termsByType?.genre ?: emptyList()
+
         val subEpisodes = mutableListOf<Episode>()
         val dubEpisodes = mutableListOf<Episode>()
 
-        episodesDoc.select("a.ep-item").forEach { ep ->
-            val epNum = ep.attr("data-number").toIntOrNull()
-            val epTitle = ep.attr("title").ifBlank { "Episode $epNum" }
-            val epId = ep.attr("data-id")
-            val epHref = ep.attr("href").ifBlank { "$url/ep-$epNum" }
-            val isFiller = ep.hasClass("ssl-item-filler")
+        seriesData.episodes.forEach { ep ->
+            val subUrl = ep.embedUrl?.sub
+            val dubUrl = ep.embedUrl?.dub
 
-            // Data format: animeId|episodeId
-            val dataStr = "$animeId|$epId"
-
-            val episode = newEpisode(dataStr) {
-                this.name = epTitle
-                this.episode = epNum
+            if (!subUrl.isNullOrBlank()) {
+                subEpisodes.add(newEpisode(subUrl) {
+                    this.name = ep.title ?: "Episode ${ep.number}"
+                    this.episode = ep.number
+                })
             }
 
-            subEpisodes.add(episode)
+            if (!dubUrl.isNullOrBlank()) {
+                dubEpisodes.add(newEpisode(dubUrl) {
+                    this.name = ep.title ?: "Episode ${ep.number}"
+                    this.episode = ep.number
+                })
+            }
         }
 
-        val tvType = if (subEpisodes.size <= 1 && url.contains("movie")) TvType.AnimeMovie else TvType.Anime
+        val tvType = if (subEpisodes.size <= 1 &&
+            seriesData.anime.termsByType?.type?.any { it.contains("Movie", true) } == true
+        ) TvType.AnimeMovie else TvType.Anime
 
         return newAnimeLoadResponse(title, url, tvType) {
             engName = title
-            japName = japName
+            japName = seriesData.anime.native
             this.posterUrl = poster
+            this.backgroundPosterUrl = backgroundImage ?: poster
             this.year = year
             this.showStatus = status
             this.plot = description
-            this.tags = tags.ifEmpty { null }
+            this.tags = genres.ifEmpty { null }
             addEpisodes(DubStatus.Subbed, subEpisodes)
             if (dubEpisodes.isNotEmpty()) {
                 addEpisodes(DubStatus.Dubbed, dubEpisodes)
             }
+            addMalId(malId)
+            addAniListId(aniId)
+        }
+    }
+
+    private suspend fun loadFromScrape(url: String, slug: String): LoadResponse {
+        // Try fetching from API by searching all pages (limited)
+        // Or just create a basic response from the URL
+        val document = app.get(url).document
+
+        val title = document.selectFirst("h2.film-name")?.text()?.trim()
+            ?: document.selectFirst("h1")?.text()?.trim()
+            ?: slug.replace("-", " ").replaceFirstChar { it.uppercase() }
+
+        val poster = document.selectFirst("img.film-poster-img")?.attr("src")
+        val description = document.selectFirst("div.film-description div.text")?.text()?.trim()
+
+        return newAnimeLoadResponse(title, url, TvType.Anime) {
+            engName = title
+            this.posterUrl = poster
+            this.plot = description
+            addEpisodes(DubStatus.Subbed, emptyList())
         }
     }
 
@@ -176,81 +186,79 @@ class Anikoto : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val parts = data.split("|")
-        if (parts.size < 2) return false
+        // data is the megaplay.buzz embed URL directly from the API
+        // e.g. https://megaplay.buzz/stream/s-2/169591/sub
+        Log.d(TAG, "Loading links from: $data")
 
-        val animeId = parts[0]
-        val episodeId = parts[1]
-
-        // Get available servers for this episode
-        val serversUrl = "$mainUrl/ajax/v2/episode/servers?episodeId=$episodeId"
-        val serversHtml = app.get(serversUrl, headers = mapOf(
-            "X-Requested-With" to "XMLHttpRequest",
-            "Referer" to mainUrl
-        )).parsedSafe<AjaxResponse>()?.html ?: return false
-
-        val serversDoc = org.jsoup.Jsoup.parse(serversHtml)
-
-        // Process each server
-        serversDoc.select("div.server-item").forEach { server ->
-            val serverId = server.attr("data-id")
-            val serverName = server.text().trim()
-            val serverType = server.attr("data-type") // sub or dub
-
-            try {
-                // Get the embed URL for this server
-                val sourceUrl = "$mainUrl/ajax/v2/episode/sources?id=$serverId"
-                val sourceResponse = app.get(sourceUrl, headers = mapOf(
-                    "X-Requested-With" to "XMLHttpRequest",
-                    "Referer" to mainUrl
-                )).text
-
-                val sourceData = parseJson<SourceResponse>(sourceResponse)
-                val embedUrl = sourceData.link
-                if (embedUrl.isNullOrBlank()) return@forEach
-
-                Log.d(TAG, "Server: $serverName ($serverType), Embed: $embedUrl")
-
-                // Route to appropriate extractor based on the embed URL
-                when {
-                    embedUrl.contains("megaplay.buzz") || embedUrl.contains("megacloud") -> {
-                        MegaPlayExtractor().getUrl(
-                            embedUrl,
-                            mainUrl,
-                            subtitleCallback,
-                            callback
-                        )
-                    }
-                    embedUrl.contains("rapid-cloud") -> {
-                        MegaPlayExtractor().getUrl(
-                            embedUrl,
-                            mainUrl,
-                            subtitleCallback,
-                            callback
-                        )
-                    }
-                    else -> {
-                        loadExtractor(embedUrl, mainUrl, subtitleCallback, callback)
-                    }
-                }
-            } catch (e: Exception) {
-                Log.e(TAG, "Error loading server $serverName: ${e.message}")
-            }
+        if (data.contains("megaplay.buzz")) {
+            MegaPlayExtractor().getUrl(data, mainUrl, subtitleCallback, callback)
+            return true
         }
 
+        // Fallback: try generic extractor
+        loadExtractor(data, mainUrl, subtitleCallback, callback)
         return true
     }
 
-    data class AjaxResponse(
-        @JsonProperty("status") val status: Boolean? = null,
-        @JsonProperty("html") val html: String? = null,
+    // API Data Classes
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    data class ApiRecentResponse(
+        @JsonProperty("ok") val ok: Boolean,
+        @JsonProperty("data") val data: List<ApiAnime>,
     )
 
-    data class SourceResponse(
-        @JsonProperty("type") val type: String? = null,
-        @JsonProperty("link") val link: String? = null,
-        @JsonProperty("sources") val sources: List<Any>? = null,
-        @JsonProperty("tracks") val tracks: List<Any>? = null,
-        @JsonProperty("htmlGuide") val htmlGuide: String? = null,
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    data class ApiSeriesResponse(
+        @JsonProperty("ok") val ok: Boolean,
+        @JsonProperty("data") val data: ApiSeriesData,
+    )
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    data class ApiSeriesData(
+        @JsonProperty("anime") val anime: ApiAnime,
+        @JsonProperty("episodes") val episodes: List<ApiEpisode>,
+    )
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    data class ApiAnime(
+        @JsonProperty("id") val id: Int,
+        @JsonProperty("title") val title: String,
+        @JsonProperty("alternative") val alternative: String? = null,
+        @JsonProperty("native") val native: String? = null,
+        @JsonProperty("slug") val slug: String,
+        @JsonProperty("poster") val poster: String? = null,
+        @JsonProperty("description") val description: String? = null,
+        @JsonProperty("aired") val aired: String? = null,
+        @JsonProperty("year") val year: Int? = null,
+        @JsonProperty("status") val status: String? = null,
+        @JsonProperty("score") val score: String? = null,
+        @JsonProperty("mal_id") val malId: String? = null,
+        @JsonProperty("ani_id") val aniId: String? = null,
+        @JsonProperty("episodes") val episodes: String? = null,
+        @JsonProperty("is_sub") val isSub: Int? = null,
+        @JsonProperty("background_image") val backgroundImage: String? = null,
+        @JsonProperty("terms_by_type") val termsByType: ApiTerms? = null,
+    )
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    data class ApiTerms(
+        @JsonProperty("genre") val genre: List<String>? = null,
+        @JsonProperty("type") val type: List<String>? = null,
+        @JsonProperty("studios") val studios: List<String>? = null,
+    )
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    data class ApiEpisode(
+        @JsonProperty("id") val id: Int,
+        @JsonProperty("title") val title: String? = null,
+        @JsonProperty("number") val number: Int,
+        @JsonProperty("episode_embed_id") val episodeEmbedId: String? = null,
+        @JsonProperty("embed_url") val embedUrl: ApiEmbedUrl? = null,
+    )
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    data class ApiEmbedUrl(
+        @JsonProperty("sub") val sub: String? = null,
+        @JsonProperty("dub") val dub: String? = null,
     )
 }

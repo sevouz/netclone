@@ -38,15 +38,18 @@ class MegaPlayExtractor : ExtractorApi() {
         )
 
         try {
-            // --- Primary API Method ---
             val headers = mapOf(
                 "Accept" to "*/*",
                 "X-Requested-With" to "XMLHttpRequest",
                 "Referer" to mainUrl
             )
 
-            val id = app.get(url, headers = headers).document
-                .selectFirst("#megaplay-player")?.attr("data-id")
+            // The URL from API is like: https://megaplay.buzz/stream/s-2/169591/sub
+            // We need to load this page and find the player data-id
+            val pageResponse = app.get(url, headers = headers)
+            val document = pageResponse.document
+
+            val id = document.selectFirst("#megaplay-player")?.attr("data-id")
 
             if (id.isNullOrBlank()) {
                 Log.e(TAG, "Could not find megaplay-player data-id from: $url")
@@ -54,10 +57,13 @@ class MegaPlayExtractor : ExtractorApi() {
                 return
             }
 
+            Log.d(TAG, "Found data-id: $id")
+
             val apiUrl = "$mainUrl/stream/getSources?id=$id&id=$id"
             val gson = Gson()
             val response = try {
                 val json = app.get(apiUrl, headers).text
+                Log.d(TAG, "getSources response: $json")
                 gson.fromJson(json, MegaPlayResponse::class.java)
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to parse getSources response: ${e.message}")
@@ -66,7 +72,7 @@ class MegaPlayExtractor : ExtractorApi() {
 
             val m3u8 = response?.sources?.file
             if (m3u8.isNullOrBlank()) {
-                Log.e(TAG, "No sources found, trying fallback")
+                Log.e(TAG, "No sources found in response, trying fallback")
                 fallbackWebView(url, mainheaders, subtitleCallback, callback)
                 return
             }
@@ -102,7 +108,7 @@ class MegaPlayExtractor : ExtractorApi() {
         """.trimIndent()
 
         val m3u8Resolver = WebViewResolver(
-            interceptUrl = Regex("""master\.m3u8|index\.m3u8|playlist\.m3u8"""),
+            interceptUrl = Regex("""master\.m3u8|index\.m3u8|playlist\.m3u8|\.m3u8"""),
             additionalUrls = listOf(Regex("""\.m3u8""")),
             script = jsToClickPlay,
             scriptCallback = { result -> Log.d(TAG, "JS Result: $result") },
@@ -120,11 +126,16 @@ class MegaPlayExtractor : ExtractorApi() {
         )
 
         try {
-            val vttResponse = app.get(url = url, referer = mainUrl, interceptor = vttResolver)
-            val subtitleUrls = listOf(vttResponse.url)
-                .filter { it.endsWith(".vtt") && !it.contains("thumbnails", ignoreCase = true) }
-            subtitleUrls.forEach { subUrl ->
-                subtitleCallback(newSubtitleFile("English", subUrl))
+            // Try subtitles first
+            try {
+                val vttResponse = app.get(url = url, referer = mainUrl, interceptor = vttResolver)
+                val subtitleUrls = listOf(vttResponse.url)
+                    .filter { it.endsWith(".vtt") && !it.contains("thumbnails", ignoreCase = true) }
+                subtitleUrls.forEach { subUrl ->
+                    subtitleCallback(newSubtitleFile("English", subUrl))
+                }
+            } catch (e: Exception) {
+                Log.d(TAG, "No subtitles found: ${e.message}")
             }
 
             val fallbackM3u8 = app.get(url = url, referer = mainUrl, interceptor = m3u8Resolver).url
