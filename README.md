@@ -19,7 +19,7 @@
 Add this URL as a repository in **Cloudstream**:
 
 ```
-https://raw.githubusercontent.com/sevouz/netclone/builds/plugins.json
+https://raw.githubusercontent.com/sevouz/netclone/builds/netclone.json
 ```
 
 ### Steps:
