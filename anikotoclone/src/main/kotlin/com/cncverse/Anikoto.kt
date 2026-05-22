@@ -31,31 +31,34 @@ class Anikoto : MainAPI() {
     override val mainPage = mainPageOf(
         "$mainUrl/filter?page=" to "Latest",
         "$mainUrl/status/ongoing?page=" to "Ongoing",
+        "$mainUrl/most-viewed?page=" to "Most Viewed",
         "$mainUrl/status/completed?page=" to "Completed",
     )
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val url = "${request.data}$page"
         val document = app.get(url).document
-        val home = document.select("div.flw-item").mapNotNull { it.toSearchResult() }
+        val home = document.select("div#list-items div.item").mapNotNull { it.toSearchResult() }
         return newHomePageResponse(request.name, home, hasNext = home.isNotEmpty())
     }
 
     private fun Element.toSearchResult(): SearchResponse? {
-        val aTag = this.selectFirst("a.dynamic-name") ?: this.selectFirst("h3.film-name a") ?: return null
-        val title = aTag.text().trim().ifBlank { return null }
-        val href = fixUrl(aTag.attr("href"))
-        val posterUrl = this.selectFirst("img.film-poster-img")?.attr("data-src")
-            ?: this.selectFirst("img")?.attr("data-src")
+        val nameTag = this.selectFirst("a.name.d-title") ?: return null
+        val title = nameTag.text().trim().ifBlank { return null }
+        val href = fixUrl(nameTag.attr("href"))
+        // Remove /ep-X from the URL to get the base watch URL
+        val cleanHref = href.replace(Regex("/ep-\\d+$"), "")
+
+        val posterUrl = this.selectFirst("div.ani.poster img")?.attr("src")
             ?: this.selectFirst("img")?.attr("src")
 
-        val subText = this.selectFirst("div.tick-sub")?.text()?.trim()
-        val dubText = this.selectFirst("div.tick-dub")?.text()?.trim()
+        val subText = this.selectFirst("span.ep-status.sub span")?.text()?.trim()
+        val dubText = this.selectFirst("span.ep-status.dub span")?.text()?.trim()
 
         val subCount = subText?.toIntOrNull()
         val dubCount = dubText?.toIntOrNull()
 
-        return newAnimeSearchResponse(title, href, TvType.Anime) {
+        return newAnimeSearchResponse(title, cleanHref, TvType.Anime) {
             this.posterUrl = posterUrl
             addDubStatus(
                 dubExist = dubCount != null && dubCount > 0,
@@ -69,29 +72,33 @@ class Anikoto : MainAPI() {
     override suspend fun search(query: String): List<SearchResponse> {
         val url = "$mainUrl/filter?keyword=$query"
         val document = app.get(url).document
-        return document.select("div.flw-item").mapNotNull { it.toSearchResult() }
+        return document.select("div#list-items div.item").mapNotNull { it.toSearchResult() }
     }
 
     override suspend fun load(url: String): LoadResponse {
         // Extract slug from URL like /watch/re-zero-starting-life-in-another-world-season-4-4hk9h
         val slug = url.substringAfterLast("/watch/").substringBefore("/").substringBefore("?")
 
-        // Try to find the anime in the API by slug
-        val apiData = try {
+        // Try to find the anime in the API
+        val apiAnime = findAnimeInApi(slug)
+
+        if (apiAnime != null) {
+            return loadFromApi(apiAnime, url)
+        }
+
+        // Fallback: use recent-anime API list
+        return loadFallback(url, slug)
+    }
+
+    private suspend fun findAnimeInApi(slug: String): ApiAnime? {
+        return try {
             val recentResponse = app.get("$API_URL/recent-anime").text
             val recentResult = parseJson<ApiRecentResponse>(recentResponse)
             recentResult.data.firstOrNull { it.slug == slug }
         } catch (e: Exception) {
-            Log.e(TAG, "API recent-anime failed: ${e.message}")
+            Log.e(TAG, "API lookup failed: ${e.message}")
             null
         }
-
-        if (apiData != null) {
-            return loadFromApi(apiData, url)
-        }
-
-        // Fallback: scrape the page directly
-        return loadFromScrape(url, slug)
     }
 
     private suspend fun loadFromApi(anime: ApiAnime, url: String): LoadResponse {
@@ -160,17 +167,20 @@ class Anikoto : MainAPI() {
         }
     }
 
-    private suspend fun loadFromScrape(url: String, slug: String): LoadResponse {
-        // Try fetching from API by searching all pages (limited)
-        // Or just create a basic response from the URL
+    private suspend fun loadFallback(url: String, slug: String): LoadResponse {
+        // Scrape the watch page for basic info
         val document = app.get(url).document
 
         val title = document.selectFirst("h2.film-name")?.text()?.trim()
-            ?: document.selectFirst("h1")?.text()?.trim()
-            ?: slug.replace("-", " ").replaceFirstChar { it.uppercase() }
+            ?: document.selectFirst("a.name.d-title")?.text()?.trim()
+            ?: slug.replace("-", " ").split(" ").dropLast(1)
+                .joinToString(" ") { it.replaceFirstChar { c -> c.uppercase() } }
 
-        val poster = document.selectFirst("img.film-poster-img")?.attr("src")
-        val description = document.selectFirst("div.film-description div.text")?.text()?.trim()
+        val poster = document.selectFirst("div.ani.poster img")?.attr("src")
+            ?: document.selectFirst("img.film-poster-img")?.attr("src")
+
+        val description = document.selectFirst("div.film-description")?.text()?.trim()
+            ?: document.selectFirst("div.description")?.text()?.trim()
 
         return newAnimeLoadResponse(title, url, TvType.Anime) {
             engName = title
