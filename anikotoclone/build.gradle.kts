@@ -30,7 +30,8 @@ cloudstream {
         "OVA",
     )
 
-    iconUrl = "https://www.google.com/s2/favicons?domain=anikototv.to&sz=%size%"
+    iconUrl = "https://raw.githubusercontent.com/sevouz/netclone/master/anikotoclone/icon.png"
+
 
     isCrossPlatform = false
 }
